@@ -14,18 +14,20 @@
 #
 import os
 import re
+import subprocess
+import time
 
-from wa import ApkUiautoWorkload, Parameter
+from wa import ApkUiautoWorkload, Parameter, Workload
 from wa.framework.exception import ValidationError, WorkloadError
 from wa.utils.types import list_of_strs
 from wa.utils.misc import unique
 
 
-class Speedometer(ApkUiautoWorkload):
+class Speedometer(Workload):
 
     name = 'speedometer'
     package_names = ['com.android.chrome']
-    regex = re.compile(r'Speedometer Score ([\d.]+)')
+    regex = re.compile('text="(\d+.\d+)" resource-id="result-number"')
     versions = ['1.0', '2.0']
     description = '''
     A workload to execute the speedometer web based benchmark
@@ -49,18 +51,43 @@ class Speedometer(ApkUiautoWorkload):
 
     def __init__(self, target, **kwargs):
         super(Speedometer, self).__init__(target, **kwargs)
-        self.gui.timeout = 1500
-        self.gui.uiauto_params['version'] = self.speedometer_version
+
+    def setup(self, context):
+        super(Speedometer, self).setup(context)
+        subprocess.check_output('adb reverse tcp:8000 tcp:8000', shell=True)
+
+    def run(self, context):
+        super(Speedometer, self).run(context)
+        url = 'am start -a android.intent.action.VIEW -d http://localhost:8000/Speedometer2.0/index.html'
+        self.target.execute(url) 
+
+        # Wait 60 seconds at least, and then wait until we don't see the 'sandboxed_process' process for 10 seconds.
+        time.sleep(60)
+
+        countdown = 5
+        while countdown > 0:
+            busiest_line = subprocess.check_output('adb shell top -n1 -m1 -q -b', shell=True).decode('utf-8').split("\n")[0]
+            while "sandboxed_process" in busiest_line:
+                countdown = 5
+                time.sleep(2)
+                busiest_line = subprocess.check_output('adb shell top -n1 -m1 -q -b', shell=True).decode('utf-8').split("\n")[0]
+            time.sleep(2)
+            countdown -= 1
+
+    def teardown(self, context):
+        super(Speedometer, self).teardown(context)
+        subprocess.check_output('adb reverse --remove tcp:8000', shell=True)
 
     def update_output(self, context):
         super(Speedometer, self).update_output(context)
+        subprocess.check_output("adb shell su -c 'uiautomator dump'", shell=True)
+        subprocess.check_output('adb pull /sdcard/window_dump.xml .', shell=True)
+        with open('window_dump.xml', 'rb') as fh:
+            dump = fh.read().decode('utf-8')
+        match = self.regex.search(dump)
         result = None
-        logcat_file = context.get_artifact_path('logcat')
-        with open(logcat_file, errors='replace') as fh:
-            for line in fh:
-                match = self.regex.search(line)
-                if match:
-                    result = float(match.group(1))
+        if match:
+            result = float(match.group(1))
 
         if result is not None:
             context.add_metric('Speedometer Score', result, 'Runs per minute', lower_is_better=False)
